@@ -1,0 +1,576 @@
+<template>
+  <!-- 主容器 - 包含所有UI元素 -->
+  <div class="container">
+    <!-- 电池电量显示区域 (左上角) -->
+    <!-- batteryLevel: 显示当前电池百分比 -->
+    <div class="battery-count">
+      <text class="battery-label">BAT</text>
+      <text class="battery-value">{{ batteryLevel }}%</text>
+    </div>
+
+    <!-- GPS精度显示区域 (右上角) -->
+    <!-- accuracy: GPS精度值 -->
+    <!-- statMsg: 状态信息，失败时显示红色X -->
+    <div class="accuracy-count">
+        <text class="accuracy-label">ACC</text>
+        <text class="accuracy-value" style="{{statMsg !== '获取成功' ? 'color:#ff0000' : ''}}">{{ statMsg !== '获取成功' ? 'X' : accuracy }}</text>
+    </div>
+    <!-- GPS连接状态显示 -->
+    <!-- hasGPSSignal: 是否有GPS信号 -->
+    <!-- gpsStatus: 连接状态文本 -->
+    <div class="gps-status">
+        <text class="gps-status-value" style="{{hasGPSSignal ? 'color:#4cff4c' : 'color:#ff4444'}}">{{gpsStatus}}</text>
+    </div>
+
+    <!-- 速度显示区域 (上半部分) -->
+    <!-- speed: 当前速度(km/h) -->
+    <div class="speed-section">
+      <text class="speed-label">SPEED(km/h)</text>
+      <text class="speed-value">{{ speed }}</text>
+    </div>
+
+    <!-- 底部区域 - 包含航向和行程数据 -->
+    <div class="bottom-section">
+      <!-- Left Side - Heading -->
+      <div class="left-panel">
+        <text class="heading-label">HEADING</text>
+        <text class="heading-value">{{ heading }}°</text>
+      </div>
+
+      <!-- Right Side - Trip Data -->
+      <div class="right-panel">
+        <div class="trip-data">
+          <text class="distance-label">DISTANCE</text>
+          <text class="distance-value">{{ distance.toFixed(1) }} km</text>
+        </div>
+        <div class="trip-data">
+          <text class="duration-label">DURATION</text>
+          <text class="duration-value">{{ duration }}</text>
+        </div>
+      </div>
+    </div>
+
+    <!-- 控制按钮区域 -->
+    <!-- isRecording: 是否正在记录 -->
+    <!-- isPaused: 是否暂停 -->
+    <!-- hasGPSSignal: 控制按钮可用状态 -->
+    <div class="button-container">
+      <input class="btn pause-btn" type="button" value="{{isRecording ? (isPaused ? 'Continue' : 'Pause') : 'Start'}}" onclick="togglePause" disabled="{{!hasGPSSignal}}" />
+      <input class="btn stop-btn" type="button" value="Stop" onclick="stopRecording" disabled="{{!isRecording}}" />
+    </div>
+  </div>
+</template>
+
+<script>
+import geolocation from '@system.geolocation'
+import sensor from '@system.sensor'
+import brightness from '@system.brightness'
+import vibrator from '@system.vibrator'
+import battery from '@system.battery'
+
+export default {
+  // 组件私有数据
+  private: {
+    // 应用标题
+    title: "Speed Tracker",
+    // 屏幕常亮锁
+    wakeLock: null,
+    // 当前速度(km/h)
+    speed: 299,
+    // 当前航向角度(0-360°)
+    heading: 180,
+    // 总行程距离(km)
+    distance: 99.0,
+    // 行程持续时间(HH:MM:SS)
+    duration: "00:00:00",
+    // 是否正在记录行程
+    isRecording: false,
+    // 是否暂停记录
+    isPaused: false,
+    // 记录开始时间(时间戳)
+    startTime: 0,
+    // 暂停开始时间(时间戳)
+    pausedTime: 0,
+    // 总暂停时长(毫秒)
+    totalPausedDuration: 0,
+    // 上一个GPS位置点
+    lastPosition: null,
+    // 计时器引用
+    timer: null,
+    // 位置更新定时器
+    locationTimer: null,
+    // GPS重试定时器
+    gpsRetryTimer: null,
+    // GPS精度(米)
+    accuracy: 0,
+    // 电池电量百分比
+    batteryLevel: 0,
+    // 是否正在充电
+    isCharging: false,
+    // 状态消息
+    statMsg: '',
+    // 最后更新时间戳
+    lastUpdateTime: 0,
+    // 是否有GPS信号
+    hasGPSSignal: false,
+    // GPS状态文本
+    gpsStatus: '正在连接GPS...',
+    // 是否正在重试GPS连接
+    isGpsRetrying: false,
+    // GPS失败计数
+    gpsFailCount: 0,
+    // 成功获取GPS位置次数
+    successfulLocationReadings: 0
+  },
+
+  // 组件初始化
+  onInit() {
+    // 设置屏幕最大亮度并保持常亮
+    // Set max brightness and keep screen on
+    try {
+      if (brightness && brightness.setValue) {
+        brightness.setValue({
+          value: 255,
+          fail: (err) => {
+            console.warn('Failed to set brightness:', err)
+          }
+        })
+      }
+      if (brightness && brightness.setKeepScreenOn) {
+        brightness.setKeepScreenOn({
+          keepScreenOn: true,
+          fail: (err) => {
+            console.warn('Failed to set keep screen on:', err)
+          }
+        })
+      }
+    } catch (e) {
+      console.error('Error initializing brightness settings:', e)
+    }
+
+    this.updateBatteryStatus()
+    this.waitgps()
+  },
+
+  // 等待GPS连接
+  waitgps() {
+    this.gpsStatus = '正在连接GPS...'
+    this.hasGPSSignal = false
+    
+    const tryGetLocation = () => {
+      this.gpsStatus = '正在连接GPS...'
+      geolocation.getLocation({
+        timeout: 30000,
+        success: (data) => {
+          this.hasGPSSignal = true
+          this.gpsStatus = 'GPS已连接'
+          this.statMsg = '获取成功'
+          this.successfulLocationReadings++
+          this.startLocationUpdates()
+        },
+        fail: (data, code) => {
+          this.hasGPSSignal = false
+          this.gpsStatus = 'GPS连接失败'
+          this.statMsg = `获取失败:${code}`
+          this.gpsFailCount++
+          console.log(`GPS获取失败, code=${code}, errorMsg=${data}`)
+          
+          // 3秒后重试
+          this.gpsRetryTimer = setTimeout(tryGetLocation, 3000)
+        }
+      })
+    }
+    
+    tryGetLocation()
+  },
+
+  // 开始定期位置更新
+  startLocationUpdates() {
+    if (this.locationTimer) {
+      clearInterval(this.locationTimer)
+    }
+    
+    // 每500ms获取一次位置
+    this.locationTimer = setInterval(() => {
+      geolocation.getLocation({
+        timeout: 30000,
+        success: (data) => {
+          this.lastUpdateTime = Date.now()
+          this.hasGPSSignal = true
+          this.statMsg = '获取成功'
+          this.accuracy = data.accuracy
+          
+          // 计算速度和距离
+          if (this.lastPosition) {
+            const dist = this.calculateDistance(
+              this.lastPosition.latitude,
+              this.lastPosition.longitude,
+              data.latitude,
+              data.longitude
+            )
+            this.distance += dist
+            
+            // 速度计算(m/s转km/h)
+            const timeDiff = (this.lastUpdateTime - this.lastPosition.timestamp) / 1000
+            if (timeDiff > 0) {
+              this.speed = Math.round((dist * 1000 / timeDiff) * 3.6)
+            }
+            
+            this.calculateHeading(
+              this.lastPosition.latitude,
+              this.lastPosition.longitude,
+              data.latitude,
+              data.longitude
+            )
+          }
+          
+          this.lastPosition = {
+            latitude: data.latitude,
+            longitude: data.longitude,
+            timestamp: this.lastUpdateTime
+          }
+        },
+        fail: (data, code) => {
+          // GPS信号丢失，重新等待连接
+          this.hasGPSSignal = false
+          this.gpsStatus = 'GPS丢失，重新连接中...'
+          this.statMsg = `获取失败:${code}`
+          clearInterval(this.locationTimer)
+          this.waitgps()
+        }
+      })
+    }, 500)
+  },
+
+
+  // 开始定期获取位置信息
+    // 每500毫秒获取一次位置
+
+  // 获取当前位置信息
+  
+
+  // 计算两点之间的航向角度
+  // 参数: 
+  //   lat1, lon1 - 起点经纬度
+  //   lat2, lon2 - 终点经纬度
+  // 使用Haversine公式计算方位角
+  calculateHeading(lat1, lon1, lat2, lon2) {
+    // Convert degrees to radians
+    const lat1Rad = lat1 * Math.PI / 180;
+    const lat2Rad = lat2 * Math.PI / 180;
+    const lonDiffRad = (lon2 - lon1) * Math.PI / 180;
+    
+    // Calculate bearing
+    const y = Math.sin(lonDiffRad) * Math.cos(lat2Rad);
+    const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+              Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(lonDiffRad);
+    let theta = Math.atan2(y, x);
+    
+    // Convert from radians to degrees and normalize to 0-360
+    this.heading = Math.round((theta * 180 / Math.PI + 360) % 360);
+  },
+
+
+  updateHeading(data) {
+    this.heading = Math.round(data.direction)
+  },
+
+  // 计算两点之间的距离(km)
+  // 使用Haversine公式计算球面距离
+  // 参数:
+  //   lat1, lon1 - 起点经纬度
+  //   lat2, lon2 - 终点经纬度
+  calculateDistance(lat1, lon1, lat2, lon2) {
+    // Haversine formula to calculate distance between two points
+    const R = 6371 // Earth radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180
+    const dLon = (lon2 - lon1) * Math.PI / 180
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+    return R * c
+  },
+
+  // 开始/暂停记录
+  // 首次点击开始记录，记录中点击暂停/继续
+  togglePause() {
+    // 震动反馈
+    if (vibrator) {
+      vibrator.vibrate({ mode: 'long' })
+    }
+    if (!this.isRecording) {
+      // Starting new recording
+      this.isRecording = true
+      this.startTime = Date.now()
+      this.totalPausedDuration = 0
+      this.timer = setInterval(this.updateTimer.bind(this), 1000)
+    } else {
+      // Toggle pause/continue
+      this.isPaused = !this.isPaused
+      if (this.isPaused) {
+        this.pausedTime = Date.now()
+        clearInterval(this.timer)
+      } else {
+        this.totalPausedDuration += Date.now() - this.pausedTime
+        this.timer = setInterval(this.updateTimer.bind(this), 1000)
+      }
+    }
+  },
+
+  // 停止记录
+  // 重置所有记录相关状态
+  stopRecording() {
+    // 震动反馈
+    if (vibrator) {
+      vibrator.vibrate({ mode: 'long' })
+    }
+    this.isRecording = false
+    this.isPaused = false
+    clearInterval(this.timer)
+    this.startTime = 0
+    this.totalPausedDuration = 0
+  },
+
+  // 更新计时器显示
+  // 计算经过时间(排除暂停时间)
+  updateTimer() {
+    const elapsed = Date.now() - this.startTime - this.totalPausedDuration
+    const hours = Math.floor(elapsed / 3600000)
+    const minutes = Math.floor((elapsed % 3600000) / 60000)
+    const seconds = Math.floor((elapsed % 60000) / 1000)
+    
+    this.duration = 
+      `${hours.toString().padStart(2, '0')}:` +
+      `${minutes.toString().padStart(2, '0')}:` +
+      `${seconds.toString().padStart(2, '0')}`
+  },
+
+  // 更新电池状态
+  // 获取当前电量百分比和充电状态
+  updateBatteryStatus() {
+    battery.getStatus({
+      success: (data) => {
+        // Validate battery level is between 0 and 1
+        if (typeof data.level === 'number' && data.level >= 0 && data.level <= 1) {
+          this.batteryLevel = Math.round(data.level * 100)
+          this.isCharging = data.charging
+        } else {
+          console.warn('Invalid battery level received:', data.level)
+          this.batteryLevel = '--' // Show placeholder for invalid value
+        }
+      },
+      fail: (err) => {
+        console.error('Failed to get battery status:', err)
+        this.batteryLevel = '--' // Show placeholder on error
+      }
+    })
+  },
+
+  resetTrip() {
+    this.distance = 999.0
+    this.duration = "00:00:00"
+    if (this.isRecording) {
+      this.startTime = Date.now()
+    }
+  },
+
+
+
+  // 组件销毁时清理
+  // 清除所有定时器并恢复屏幕设置
+  onDestroy() {
+    if (this.locationTimer) {
+      clearInterval(this.locationTimer)
+    }
+    if (this.timer) {
+      clearInterval(this.timer)
+    }
+    
+    // Release wake lock and reset brightness
+    try {
+      if (brightness && brightness.setKeepScreenOn) {
+        brightness.setKeepScreenOn({keepScreenOn: false})
+      }
+      if (brightness && brightness.setValue) {
+        brightness.setValue({value: 100}) // Reset to default brightness
+      }
+    } catch (e) {
+      console.error('Error cleaning up brightness settings:', e)
+    }
+  }
+}
+</script>
+
+<style>
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: #000000;
+}
+
+/* Speed Section (Top Half) */
+.speed-section {
+  flex: 1.2;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding-top: 30px;
+}
+
+.speed-label {
+  font-size: 20px;
+  color: #aaaaaa;
+  margin-bottom: 8px;
+}
+
+.speed-value {
+  font-size: 144px;
+  font-weight: bold;
+  color: #4cff4c;
+}
+
+/* Bottom Section */
+.bottom-section {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  padding-bottom: 10px;
+}
+
+/* Left Panel - Heading */
+.left-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.heading-label {
+  font-size: 18px;
+  color: #aaaaaa;
+  margin-bottom: 8px;
+}
+
+.heading-value {
+  font-size: 36px;
+  color: #66a3ff;
+}
+
+/* Right Panel - Trip Data */
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.trip-data {
+  margin: 12px 0;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.distance-label,
+.duration-label {
+  font-size: 16px;
+  color: #aaaaaa;
+  margin-bottom: 6px;
+}
+
+.distance-value,
+.duration-value {
+  font-size: 28px;
+  color: #ffffff;
+}
+
+/* Battery Level */
+.battery-count {
+  position: absolute;
+  top: 30px;
+  left: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.battery-label {
+  font-size: 16px;
+  color: #aaaaaa;
+}
+
+.battery-value {
+  font-size: 22px;
+  color: #ffffff;
+  font-weight: bold;
+}
+
+/* Accuracy */
+.accuracy-count {
+  position: absolute;
+  top: 30px;
+  right: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.gps-status {
+  position: absolute;
+  top: 80px;
+  right: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.gps-status-value {
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.accuracy-label {
+  font-size: 14px;
+  color: #aaaaaa;
+}
+
+.accuracy-value {
+  font-size: 20px;
+  color: #ffffff;
+  font-weight: bold;
+}
+
+/* Buttons */
+.button-container {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  width: 100%;
+  margin-top: auto;
+  padding: 15px 0;
+}
+
+.btn {
+  width: 180px;
+  height: 70px;
+  margin: 0 8px;
+  border-radius: 35px;
+  font-size: 24px;
+  color: #ffffff;
+}
+
+.pause-btn {
+  background-color: #09ba07;
+}
+
+.stop-btn {
+  background-color: #ff4444;
+}
+</style>

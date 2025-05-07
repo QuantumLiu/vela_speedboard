@@ -1,0 +1,50 @@
+{
+  "package": "com.application.watch.demo",
+  "name": "motorspeed",
+  "permissions": [
+    { "name": "hapjs.permission.LOCATION" }
+  ],
+  "versionName": "1.2.0",
+  "versionCode": 1,
+  "minPlatformVersion": 1000,
+  "icon": "/common/logo.png",
+  "deviceTypeList": [
+    "watch"
+  ],
+  "features": [
+    {
+      "name": "system.router"
+    },
+    {
+      "name": "system.geolocation"
+    },
+    {
+      "name": "system.sensor"
+    },
+    {
+      "name": "system.brightness"
+    },
+    
+    {
+      "name": "system.vibrator"
+    },
+    {
+      "name": "system.battery"
+    }
+  ],
+  "config": {
+    "logLevel": "log",
+    "designWidth": 432
+  },
+  "router": {
+    "entry": "pages/index",
+    "pages": {
+      "pages/index": {
+        "component": "index"
+      },
+      "pages/detail": {
+        "component": "detail"
+      }
+    }
+  }
+}
